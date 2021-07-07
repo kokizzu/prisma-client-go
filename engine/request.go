@@ -10,25 +10,18 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/prisma/prisma-client-go/generator/runtime"
 	"github.com/prisma/prisma-client-go/logger"
+	"github.com/prisma/prisma-client-go/runtime/types"
 )
 
-var internalUpdateNotFoundMessage = "Error occurred during query execution:\nInterpretationError(\"Error for binding" +
-	" \\'0\\'\", Some(QueryGraphBuilderError(RecordNotFound(\"Record to update not found.\"))))"
-var internalDeleteNotFoundMessage = "Error occurred during query execution:\nInterpretationError(\"Error for binding" +
-	" \\'0\\'\", Some(QueryGraphBuilderError(RecordNotFound(\"Record to delete does not exist.\"))))"
+var internalUpdateNotFoundMessage = "Error occurred during query execution:\nInterpretationError(\"Error for binding '0'\", Some(QueryGraphBuilderError(RecordNotFound(\"Record to update not found.\"))))"
+var internalDeleteNotFoundMessage = "Error occurred during query execution:\nInterpretationError(\"Error for binding '0'\", Some(QueryGraphBuilderError(RecordNotFound(\"Record to delete does not exist.\"))))"
 
 // Do sends the http Request to the query engine and unmarshals the response
-func (e *Engine) Do(ctx context.Context, query string, v interface{}) error {
+func (e *QueryEngine) Do(ctx context.Context, payload interface{}, v interface{}) error {
 	startReq := time.Now()
 
-	payload := GQLRequest{
-		Query:     query,
-		Variables: map[string]interface{}{},
-	}
-
-	body, err := e.Request(ctx, "POST", "/", &payload)
+	body, err := e.Request(ctx, "POST", "/", payload)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -46,12 +39,12 @@ func (e *Engine) Do(ctx context.Context, query string, v interface{}) error {
 		first := response.Errors[0]
 		if first.Message == internalUpdateNotFoundMessage ||
 			first.Message == internalDeleteNotFoundMessage {
-			return runtime.ErrNotFound
+			return types.ErrNotFound
 		}
 		return fmt.Errorf("pql error: %s", first.Message)
 	}
 
-	if err := json.Unmarshal(response.Data, v); err != nil {
+	if err := json.Unmarshal(response.Data.Result, v); err != nil {
 		return fmt.Errorf("json unmarshal: %w", err)
 	}
 
@@ -60,14 +53,32 @@ func (e *Engine) Do(ctx context.Context, query string, v interface{}) error {
 	return nil
 }
 
-func (e *Engine) Request(ctx context.Context, method string, path string, payload interface{}) ([]byte, error) {
+// Do sends the http Request to the query engine and unmarshals the response
+func (e *QueryEngine) Batch(ctx context.Context, payload interface{}, v interface{}) error {
+	body, err := e.Request(ctx, "POST", "/", payload)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+
+	if err := json.Unmarshal(body, &v); err != nil {
+		return fmt.Errorf("json unmarshal: %w", err)
+	}
+
+	return nil
+}
+
+func (e *QueryEngine) Request(ctx context.Context, method string, path string, payload interface{}) ([]byte, error) {
 	requestBody, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("payload marshal: %w", err)
 	}
 
-	req, err := http.NewRequest(method, e.url+path, bytes.NewBuffer(requestBody))
+	// TODO use specific log level
+	if logger.Enabled {
+		logger.Debug.Printf("prisma engine payload: `%s`", requestBody)
+	}
 
+	req, err := http.NewRequestWithContext(ctx, method, e.url+path, bytes.NewBuffer(requestBody))
 	if err != nil {
 		return nil, fmt.Errorf("raw post: %w", err)
 	}
@@ -89,7 +100,6 @@ func (e *Engine) Request(ctx context.Context, method string, path string, payloa
 	logger.Debug.Printf("[timing] query engine raw request took %s", reqDuration)
 
 	responseBody, err := ioutil.ReadAll(rawResponse.Body)
-
 	if err != nil {
 		return nil, fmt.Errorf("raw read: %w", err)
 	}
